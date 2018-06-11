@@ -1,0 +1,22 @@
+---
+version: '2'
+services:
+  prometheus:
+      <redacted>
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/prom/prometheus.yml'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      #- '--storage.tsdb.path=/pandora/data'
+    volumes:
+      - "./prometheus/:/prom"
+  adapter:
+    build: adapter/
+    ports:
+      - "1234:1234"
+  monetdb:
+    image: monetdb/monetdb-r-docker
+    ports:
+      - "50000:50000"
