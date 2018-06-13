@@ -8,6 +8,7 @@ func main() {
 	db := initDB()
 	defer db.Close()
 
+	initMetrics(":8080")
 	initRead(db)
 	initRcv(db)
 

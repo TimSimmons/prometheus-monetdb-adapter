@@ -3,6 +3,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/beorn7/perks"
+  packages = ["quantile"]
+  revision = "3a771d992973f24aa725d07868b467d1ddfceafb"
+
+[[projects]]
+  branch = "master"
   name = "github.com/fajran/go-monetdb"
   packages = ["."]
   revision = "8e87c8cb26fce863d74a97224f75767be30c2078"
@@ -32,10 +38,34 @@
   version = "v1.4.1"
 
 [[projects]]
+  name = "github.com/matttproud/golang_protobuf_extensions"
+  packages = ["pbutil"]
+  revision = "c12348ce28de40eed0136aa2b644d0ee0650e56c"
+  version = "v1.0.1"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/prometheus/client_golang"
+  packages = ["prometheus","prometheus/promhttp"]
+  revision = "faf4ec335fe01ae5a6a0eaa34a5a9333bfbd1a30"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/prometheus/client_model"
+  packages = ["go"]
+  revision = "99fa1f4be8e564e8a6b613da7fa6f46c9edafc6c"
+
+[[projects]]
   branch = "master"
   name = "github.com/prometheus/common"
-  packages = ["model"]
+  packages = ["expfmt","internal/bitbucket.org/ww/goautoneg","model"]
   revision = "7600349dcfe1abd18d72d3a1770870d9800a7801"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/prometheus/procfs"
+  packages = [".","internal/util","nfs","xfs"]
+  revision = "94663424ae5ae9856b40a9f170762b4197024661"
 
 [[projects]]
   name = "github.com/prometheus/prometheus"
@@ -70,6 +100,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "37955f6366fcfb3eb0b1f1de1316810adf5be0f60864485ae7f021130890ed74"
+  inputs-digest = "10cca84165e25f5d0dadae2951def09eb117009923f4c354df6e43537738390a"
   solver-name = "gps-cdcl"
   solver-version = 1
