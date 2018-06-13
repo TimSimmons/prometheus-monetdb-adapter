@@ -70,7 +70,7 @@ func protoToSamples(req *prompb.WriteRequest) model.Samples {
 
 		// build the corpus of samples we'll be inserting
 		// TODO: Do selection based on db/whitelist
-		if name, hasName := metric["__name__"]; hasName && (name == "up" || name == "prometheus_tsdb_head_samples_appended_total" || name == "prometheus_engine_query_duration_seconds") {
+		if name, hasName := metric["__name__"]; hasName && (name == "up" || strings.HasPrefix(string(name), "monetdb")) {
 			for _, s := range ts.Samples {
 				// skip NaN values. TODO: use 0?
 				if math.IsNaN(s.Value) {

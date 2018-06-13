@@ -184,7 +184,6 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 			})
 
 			log.Printf("returning timeseries with label values %s with %d samples", splitLabelValues, len(samples))
-
 		}
 	}
 

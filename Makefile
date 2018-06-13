@@ -1,2 +1,2 @@
 build:
-	go build -o main *.go
+	GOOS=linux go build -o main *.go
