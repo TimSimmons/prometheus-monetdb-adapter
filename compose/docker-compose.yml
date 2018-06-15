@@ -2,21 +2,27 @@
 version: '2'
 services:
   prometheus:
-      <redacted>
+    # we don't actually need SammyCA here, but this Dockerfile makes this much easier to work with
+    #image: docker.internal.digitalocean.com/eng-observability/prometheus-sammy:2.2.1
+    build: prometheus/
     ports:
       - "9090:9090"
-    command:
-      - '--config.file=/prom/prometheus.yml'
-      - '--web.enable-lifecycle'
-      - '--web.enable-admin-api'
-      #- '--storage.tsdb.path=/pandora/data'
-    volumes:
-      - "./prometheus/:/prom"
+    labels:
+      pruneable_volumes: "true"
   adapter:
     build: adapter/
     ports:
       - "1234:1234"
+      - "8080:8080"
   monetdb:
     image: monetdb/monetdb-r-docker
     ports:
       - "50000:50000"
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring 

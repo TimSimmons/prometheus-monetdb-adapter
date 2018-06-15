@@ -7,54 +7,55 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
-	_ "github.com/fajran/go-monetdb"
+	//_ "github.com/fajran/go-monetdb"
+	_ "github.internal.digitalocean.com/observability/monet/driver"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 )
 
-var upLabels = []string{"job", "instance"}
-
 func initRead(db *sql.DB) {
-	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("handling read")
+	readHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		compressed, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
 		reqBuf, err := snappy.Decode(nil, compressed)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
 		var req prompb.ReadRequest
 		if err := proto.Unmarshal(reqBuf, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
-		// TODO: Support reading from more than one reader and merging the results.
-		//if len(readers) != 1 {
-		//	http.Error(w, fmt.Sprintf("expected exactly one reader, found %d readers", len(readers)), http.StatusInternalServerError)
-		//	return
-		//}
-		//reader := readers[0]
-
 		var resp *prompb.ReadResponse
-		resp, err = handleRead(db, &req)
+		resp, err = readRequest(db, &req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
 		data, err := proto.Marshal(resp)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
@@ -64,39 +65,55 @@ func initRead(db *sql.DB) {
 		compressed = snappy.Encode(nil, data)
 		if _, err := w.Write(compressed); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 	})
+
+	readChain := promhttp.InstrumentHandlerInFlight(readInFlight,
+		promhttp.InstrumentHandlerDuration(requestDuration.MustCurryWith(prometheus.Labels{"handler": "read"}),
+			promhttp.InstrumentHandlerCounter(requestsCounter,
+				promhttp.InstrumentHandlerResponseSize(readResponseSize, readHandler),
+			),
+		),
+	)
+
+	http.Handle("/read", readChain)
 }
 
-func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, error) {
+func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, error) {
+	start := time.Now()
 	promTimeseries := []*prompb.TimeSeries{}
 
 	for _, q := range req.Queries {
-		log.Printf("%+v", q)
-
-		// TODO: also return metric name?
-		query, err := buildQuery(q)
-		metricName := "up"
+		// figure out the metric name (and thus the table name)
+		name, err := getQueryMetricName(q)
 		if err != nil {
 			return nil, err
 		}
-		log.Println(query)
 
-		rows, err := db.Query(query)
+		// look up labels for metric name
+		labels, err := getLabels(db, name)
 		if err != nil {
 			return nil, err
+		}
+
+		// build the query
+		query, err := buildQuery(q, name, labels)
+		if err != nil {
+			return nil, errors.Wrap(err, "build read query")
+		}
+
+		// execute the query
+		rows, err := db.Query(query)
+		dbQueries.Inc()
+		if err != nil {
+			queryErrors.Inc()
+			return nil, errors.Wrap(err, "exec read metrics query")
 		}
 		defer rows.Close()
 
-		// look up labels for metric name
-		cols, err := rows.Columns()
-		if err != nil {
-			return nil, err
-		}
-		log.Printf("columns: %s", cols)
-		// TODO: delete ^
-
+		// process rows, bucketing samples by timeseries label values
 		rawTimeseries := make(map[string][]*prompb.Sample)
 		rowCount := 0
 		for rows.Next() {
@@ -106,20 +123,20 @@ func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, erro
 			timestamp := new(int)
 			value := new(float64)
 			rowScan := []interface{}{timestamp, value}
-			for _ = range upLabels {
+			for _ = range labels {
 				rowScan = append(rowScan, new(string))
 			}
 
 			// read the row in
 			err := rows.Scan(rowScan...)
 			if err != nil {
-				log.Printf("error scanning rows: %s", err)
-				return nil, err
+				rowScanErrors.Inc()
+				return nil, errors.Wrap(err, "scan metric rows")
 			}
 
 			// get labels back out as strings
 			rawLabels := rowScan[2:]
-			labels := make([]string, len(upLabels))
+			labels := make([]string, len(labels))
 			for i := range labels {
 				v, ok := rawLabels[i].(*string)
 				if !ok {
@@ -128,8 +145,8 @@ func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, erro
 				labels[i] = *v
 			}
 
+			// TODO: Metric.Fingerprint() here? https://godoc.org/github.com/prometheus/common/model#Metric.Fingerprint
 			tsLabelKey := strings.Join(labels, ",")
-			// log.Printf("processing row with labelKey %s: timestamp: %d, value %f", tsLabelKey, *timestamp, *value) // delete me
 
 			sample := &prompb.Sample{
 				Timestamp: int64(*timestamp),
@@ -145,26 +162,29 @@ func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, erro
 			}
 		}
 
+		rowsRead.Add(float64(rowCount))
+
 		err = rows.Err()
 		if err != nil {
-			return nil, err
+			rowErrors.Inc()
+			return nil, errors.Wrap(err, "read metric rows")
 		}
 
 		// for each timeseries we found, make a Prometheus timeseries and attach the samples
-		for labels, samples := range rawTimeseries {
+		for foundLabels, samples := range rawTimeseries {
 			// create a label for the __name__ label
 			labelPairs := []*prompb.Label{
 				&prompb.Label{
 					Name:  model.MetricNameLabel,
-					Value: metricName,
+					Value: name,
 				},
 			}
 
-			// split the ordered label values and match them up with the labels
-			splitLabelValues := strings.Split(labels, ",")
-			for i := range upLabels {
+			// split the ordered label values and match them up with the foundLabels
+			splitLabelValues := strings.Split(foundLabels, ",")
+			for i := range labels {
 				labelPairs = append(labelPairs, &prompb.Label{
-					Name:  upLabels[i],
+					Name:  labels[i],
 					Value: splitLabelValues[i],
 				})
 			}
@@ -173,11 +193,11 @@ func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, erro
 				Labels:  labelPairs,
 				Samples: samples,
 			})
-
-			log.Printf("returning timeseries with label values %s with %d samples", splitLabelValues, len(samples))
-
 		}
 	}
+
+	elapsed := time.Since(start)
+	log.Printf("read query took %s", elapsed)
 
 	return &prompb.ReadResponse{
 		Results: []*prompb.QueryResult{
@@ -188,24 +208,11 @@ func handleRead(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, erro
 	}, nil
 }
 
-func buildQuery(q *prompb.Query) (string, error) {
+func buildQuery(q *prompb.Query, name string, labels []string) (string, error) {
 	matchers := make([]string, 0, len(q.Matchers))
 
-	from := ""
 	for _, m := range q.Matchers {
-		if m.Name == model.MetricNameLabel {
-			switch m.Type {
-			case prompb.LabelMatcher_EQ:
-				// TODO: check if name is a valid table?
-				from = fmt.Sprintf("FROM %q", m.Value)
-			default:
-				// TODO: Figure out how to support these.
-				return "", fmt.Errorf("non-equal or regex/regex-non-equal matchers are not supported on the metric name yet")
-			}
-			continue
-		}
-
-		if m.Name == "lts" {
+		if m.Name == model.MetricNameLabel || m.Name == "remote_read" {
 			continue
 		}
 
@@ -225,9 +232,24 @@ func buildQuery(q *prompb.Query) (string, error) {
 	matchers = append(matchers, fmt.Sprintf("timestamp >= %v", q.StartTimestampMs))
 	matchers = append(matchers, fmt.Sprintf("timestamp <= %v", q.EndTimestampMs))
 
-	// TODO: Group by timeseries?
-	// TODO: specify labels in select from some store of the columns
-	return fmt.Sprintf("SELECT timestamp, value, job, instance %s WHERE %v;", from, strings.Join(matchers, " AND ")), nil
+	// TODO: Group by timeseries value?
+	return fmt.Sprintf("SELECT timestamp, value, %s FROM %s WHERE %v;", strings.Join(labels, ", "), name, strings.Join(matchers, " AND ")), nil
+}
+
+func getQueryMetricName(q *prompb.Query) (string, error) {
+	for _, m := range q.Matchers {
+		if m.Name == model.MetricNameLabel {
+			switch m.Type {
+			case prompb.LabelMatcher_EQ:
+				return m.Value, nil
+			default:
+				// TODO: Figure out how to support these.
+				return "", fmt.Errorf("non-equal or regex/regex-non-equal matchers are not supported on the metric name yet")
+			}
+			continue
+		}
+	}
+	return "", fmt.Errorf("could not find metric name in query")
 }
 
 func escapeSingleQuotes(str string) string {
