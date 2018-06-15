@@ -1,11 +1,11 @@
 global:
   scrape_interval: 5s
 remote_write:
-  - url: "http://adapter:1234/receive"
+  - url: "http://adapter:1234/write"
 remote_read:
   - url: "http://adapter:1234/read"
     required_matchers:
-      "lts": "true"
+      "remote_read": "true"
     read_recent: true
   
 scrape_configs:

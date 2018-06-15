@@ -9,39 +9,46 @@ import (
 	"net/http"
 	"strings"
 
-	_ "github.com/fajran/go-monetdb"
+	//_ "github.com/fajran/go-monetdb"
+	_ "github.internal.digitalocean.com/observability/monet/driver"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/prompb"
 )
 
-func initRcv(db *sql.DB) {
-	receiveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func initWrite(db *sql.DB) {
+	writeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		compressed, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /write, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
 		reqBuf, err := snappy.Decode(nil, compressed)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /write, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
 		var req prompb.WriteRequest
 		if err := proto.Unmarshal(reqBuf, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /write, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
 		samples := protoToSamples(&req)
 		err = writeSamples(db, samples)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /write, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 	})
@@ -49,12 +56,12 @@ func initRcv(db *sql.DB) {
 	writeChain := promhttp.InstrumentHandlerInFlight(writeInFlight,
 		promhttp.InstrumentHandlerDuration(requestDuration.MustCurryWith(prometheus.Labels{"handler": "write"}),
 			promhttp.InstrumentHandlerCounter(requestsCounter,
-				promhttp.InstrumentHandlerResponseSize(writeResponseSize, receiveHandler),
+				promhttp.InstrumentHandlerResponseSize(writeResponseSize, writeHandler),
 			),
 		),
 	)
 
-	http.Handle("/receive", writeChain)
+	http.Handle("/write", writeChain)
 }
 
 // protoToSamples converts the proto objects to Prometheus objects
@@ -69,8 +76,12 @@ func protoToSamples(req *prompb.WriteRequest) model.Samples {
 		}
 
 		// build the corpus of samples we'll be inserting
-		// TODO: Do selection based on db/whitelist
-		if name, hasName := metric["__name__"]; hasName && (name == "up" || strings.HasPrefix(string(name), "monetdb")) {
+		name, hasName := metric[model.MetricNameLabel]
+		_, inLabelsMap := labelsMap[string(name)]
+		_, inWhitelist := metricWhitelist[string(name)]
+
+		// TODO: remove HasPrefix bit
+		if hasName && (inLabelsMap || inWhitelist || strings.HasPrefix(string(name), "monetdb")) {
 			for _, s := range ts.Samples {
 				// skip NaN values. TODO: use 0?
 				if math.IsNaN(s.Value) {
@@ -88,8 +99,8 @@ func protoToSamples(req *prompb.WriteRequest) model.Samples {
 	return samples
 }
 
-// TODO: Batch/txn these?
 func writeSamples(db *sql.DB, samples model.Samples) error {
+	statements := []string{}
 	for _, sample := range samples {
 		// figure out metric name
 		var name string
@@ -101,40 +112,52 @@ func writeSamples(db *sql.DB, samples model.Samples) error {
 		}
 
 		// get labels from database or create a table if it doesn't exist
-		labels := getLabelsOrCreate(db, name, metric)
+		labels, err := getLabelsOrCreate(db, name, metric)
+		if err != nil {
+			return err
+		}
 
-		// prepare the query with the right number of parameters and prep the values for the insert
-		var queryQs strings.Builder
-		metricLabelValues := []string{}
+		// build the query
+		var metricLabelValues strings.Builder
+		metricLabelValues.WriteString(fmt.Sprintf("%d ,", sample.Timestamp))
+		metricLabelValues.WriteString(fmt.Sprintf(" %f", sample.Value))
 		for _, label := range labels {
-			queryQs.WriteString(", ?")
-			metricLabelValues = append(metricLabelValues, string(metric[model.LabelName(label)]))
-		}
-		stmt, err := db.Prepare(fmt.Sprintf(insertMetricQuery, name, queryQs.String()))
-		if err != nil {
-			log.Printf("prepare insertMetric: %s", err)
-			return err
+			metricLabelValues.WriteString(fmt.Sprintf(", '%s'", string(metric[model.LabelName(label)])))
 		}
 
-		// prepare the query exec []interface{}
-		execValues := []interface{}{sample.Timestamp, sample.Value}
-		for _, label := range metricLabelValues {
-			execValues = append(execValues, label)
+		statements = append(statements, fmt.Sprintf(insertMetricQuery, name, metricLabelValues.String()))
+	}
+
+	if len(statements) > 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			return errors.Wrap(err, "begin transaction")
 		}
 
-		// execute the query
-		res, err := stmt.Exec(execValues...)
-		if err != nil {
-			log.Printf("exec insertMetric: %s", err)
-			return err
+		inserts := int64(0)
+		for _, stmt := range statements {
+			res, err := tx.Exec(stmt)
+			if err != nil {
+				tx.Rollback()
+				return errors.Wrap(err, "exec insert in transaction")
+			}
+
+			inserted, err := res.RowsAffected()
+			if err != nil {
+				// TODO: delete me
+				log.Printf("error reading number of rows affected: %s", err)
+			}
+
+			inserts += inserted
 		}
 
-		// count the rows we inserted
-		inserted, err := res.RowsAffected()
+		err = tx.Commit()
 		if err != nil {
-			log.Printf("error reading number of rows affected: %s", err)
+			queryErrors.Inc()
+			return errors.Wrap(err, "commit transacton")
 		}
-		rowsInserted.Add(float64(inserted))
+		dbQueries.Inc()
+		rowsInserted.Add(float64(inserts))
 	}
 
 	return nil

@@ -1,4 +1,4 @@
 #!/bin/bash
 
 sleep 5
-/opt/main
+/opt/prometheus_monetdb_adapter

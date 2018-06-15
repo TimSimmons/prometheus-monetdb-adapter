@@ -12,3 +12,4 @@ http://go-database-sql.org
 https://prometheus.io/docs/prometheus/latest/configuration/configuration/#<remote_write>
 https://github.com/prometheus/prometheus/blob/master/prompb/types.proto
 https://news.ycombinator.com/item?id=11896105
+https://jvns.ca/blog/2017/09/24/profiling-go-with-pprof/

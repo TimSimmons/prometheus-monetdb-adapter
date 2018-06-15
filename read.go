@@ -7,10 +7,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
-	_ "github.com/fajran/go-monetdb"
+	//_ "github.com/fajran/go-monetdb"
+	_ "github.internal.digitalocean.com/observability/monet/driver"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
@@ -19,22 +23,24 @@ import (
 
 func initRead(db *sql.DB) {
 	readHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Println("handling read")
 		compressed, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
 		reqBuf, err := snappy.Decode(nil, compressed)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
 		var req prompb.ReadRequest
 		if err := proto.Unmarshal(reqBuf, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusBadRequest, err)
 			return
 		}
 
@@ -42,12 +48,14 @@ func initRead(db *sql.DB) {
 		resp, err = readRequest(db, &req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
 		data, err := proto.Marshal(resp)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 
@@ -57,6 +65,7 @@ func initRead(db *sql.DB) {
 		compressed = snappy.Encode(nil, data)
 		if _, err := w.Write(compressed); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("HTTP Error %v on /read, cause: %s", http.StatusInternalServerError, err)
 			return
 		}
 	})
@@ -73,6 +82,7 @@ func initRead(db *sql.DB) {
 }
 
 func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, error) {
+	start := time.Now()
 	promTimeseries := []*prompb.TimeSeries{}
 
 	for _, q := range req.Queries {
@@ -91,14 +101,15 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 		// build the query
 		query, err := buildQuery(q, name, labels)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "build read query")
 		}
-		log.Println(query)
 
 		// execute the query
 		rows, err := db.Query(query)
+		dbQueries.Inc()
 		if err != nil {
-			return nil, err
+			queryErrors.Inc()
+			return nil, errors.Wrap(err, "exec read metrics query")
 		}
 		defer rows.Close()
 
@@ -119,8 +130,8 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 			// read the row in
 			err := rows.Scan(rowScan...)
 			if err != nil {
-				log.Printf("error scanning rows: %s", err)
-				return nil, err
+				rowScanErrors.Inc()
+				return nil, errors.Wrap(err, "scan metric rows")
 			}
 
 			// get labels back out as strings
@@ -136,7 +147,6 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 
 			// TODO: Metric.Fingerprint() here? https://godoc.org/github.com/prometheus/common/model#Metric.Fingerprint
 			tsLabelKey := strings.Join(labels, ",")
-			// log.Printf("processing row with labelKey %s: timestamp: %d, value %f", tsLabelKey, *timestamp, *value) // delete me
 
 			sample := &prompb.Sample{
 				Timestamp: int64(*timestamp),
@@ -156,7 +166,8 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 
 		err = rows.Err()
 		if err != nil {
-			return nil, err
+			rowErrors.Inc()
+			return nil, errors.Wrap(err, "read metric rows")
 		}
 
 		// for each timeseries we found, make a Prometheus timeseries and attach the samples
@@ -182,10 +193,11 @@ func readRequest(db *sql.DB, req *prompb.ReadRequest) (*prompb.ReadResponse, err
 				Labels:  labelPairs,
 				Samples: samples,
 			})
-
-			log.Printf("returning timeseries with label values %s with %d samples", splitLabelValues, len(samples))
 		}
 	}
+
+	elapsed := time.Since(start)
+	log.Printf("read query took %s", elapsed)
 
 	return &prompb.ReadResponse{
 		Results: []*prompb.QueryResult{
@@ -200,7 +212,7 @@ func buildQuery(q *prompb.Query, name string, labels []string) (string, error) {
 	matchers := make([]string, 0, len(q.Matchers))
 
 	for _, m := range q.Matchers {
-		if m.Name == model.MetricNameLabel || m.Name == "lts" {
+		if m.Name == model.MetricNameLabel || m.Name == "remote_read" {
 			continue
 		}
 
@@ -229,7 +241,6 @@ func getQueryMetricName(q *prompb.Query) (string, error) {
 		if m.Name == model.MetricNameLabel {
 			switch m.Type {
 			case prompb.LabelMatcher_EQ:
-				// TODO: check if name is a valid table?
 				return m.Value, nil
 			default:
 				// TODO: Figure out how to support these.

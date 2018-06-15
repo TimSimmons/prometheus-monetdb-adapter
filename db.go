@@ -6,12 +6,21 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
-	_ "github.com/fajran/go-monetdb"
+	//_ "github.com/fajran/go-monetdb"
+	_ "github.internal.digitalocean.com/observability/monet/driver"
+
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 )
 
 var tableCreateLock sync.Mutex
+
+var labelsMap = map[string]string{}
+var labelsMapLock sync.Mutex
+
+var metricWhitelist = map[string]bool{}
 
 // meta table
 var metaTableName string = "prometheus_adapter_meta"
@@ -25,47 +34,91 @@ INSERT INTO prometheus_adapter_meta VALUES ('%s', '%s');`
 var selectMetaTableQuery string = `
 SELECT labels FROM prometheus_adapter_meta WHERE metric = '%s';`
 
+var selectAllMetaTableQuery string = `
+SELECT metric, labels FROM prometheus_adapter_meta;`
+
 // metric tables
 var createTableQuery string = `
 CREATE TABLE "%s" ("timestamp" BIGINT, "value" FLOAT%s);`
 
-var insertMetricQuery string = `
-INSERT INTO "%s" VALUES (?, ?%s);`
+//var insertMetricQuery string = `
+//INSERT INTO "%s" VALUES (?, ?%s);`
+var insertMetricQuery string = `INSERT INTO "%s" VALUES (%s);`
 
 // find all tables
 var listTablesQuery string = `
 SELECT name FROM sys.tables WHERE tables.system=false;`
 
-func initDB() *sql.DB {
-	db, err := sql.Open("monetdb", "monetdb:monetdb@monetdb:50000/db")
+func initDB(dbURL string, whitelist string) (*sql.DB, error) {
+	// connect to database
+	db, err := sql.Open("monetdb", dbURL)
 	if err != nil {
-		log.Fatal(err)
+		return nil, errors.Wrap(err, "open DB")
 	}
 
 	err = db.Ping()
 	if err != nil {
-		log.Fatal(err)
+		return nil, errors.Wrap(err, "ping DB")
 	}
 	log.Println("connected successfully")
 
-	if !tableExists(db, metaTableName) {
+	// create meta table if it doesn't exist
+	exists, err := tableExists(db, metaTableName)
+	if err != nil {
+		return nil, errors.Wrap(err, "meta table existence")
+	}
+	if !exists {
 		err = createMetaTable(db)
 		if err != nil {
-			log.Fatal(err)
+			return nil, errors.Wrap(err, "create meta table")
 		}
 	}
 
-	return db
+	// init labelsMap
+	err = refreshLabelsMap(db)
+	if err != nil {
+		return nil, errors.Wrap(err, "refresh labels map")
+	}
+
+	// keep the labelsMap up to date
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		for _ = range ticker.C {
+			refreshLabelsMap(db)
+		}
+	}()
+
+	// init static Metric whitelist
+	for _, name := range strings.Split(whitelist, ",") {
+		metricWhitelist[name] = true
+	}
+
+	// db.SetConnMaxLifetime(30 * time.Second)
+	// db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(1000)
+
+	// keep the labelsMap up to date
+	ticker2 := time.NewTicker(5 * time.Second)
+	go func() {
+		for _ = range ticker2.C {
+			stats := db.Stats()
+			openConns.Set(float64(stats.OpenConnections))
+		}
+	}()
+
+	return db, nil
 }
 
-func tableExists(db *sql.DB, name string) bool {
+func tableExists(db *sql.DB, name string) (bool, error) {
 	tableCreateLock.Lock()
 	defer tableCreateLock.Unlock()
 
 	var tableName string
 	rows, err := db.Query(listTablesQuery)
+	dbQueries.Inc()
 	if err != nil {
-		log.Fatal(err)
+		queryErrors.Inc()
+		return false, errors.Wrap(err, "list tables query")
 	}
 	defer rows.Close()
 
@@ -74,20 +127,22 @@ func tableExists(db *sql.DB, name string) bool {
 		rowCounter++
 		err := rows.Scan(&tableName)
 		if err != nil {
-			log.Fatal(err)
+			rowScanErrors.Inc()
+			return false, errors.Wrap(err, "scan list tables rows")
 		}
 		if tableName == name {
-			return true
+			return true, nil
 		}
 	}
 
 	rowsRead.Add(rowCounter)
 	err = rows.Err()
 	if err != nil {
-		log.Fatal(err)
+		rowErrors.Inc()
+		return false, errors.Wrap(err, "list tables rows")
 	}
 
-	return false
+	return false, nil
 }
 
 func createMetaTable(db *sql.DB) error {
@@ -95,11 +150,13 @@ func createMetaTable(db *sql.DB) error {
 	defer tableCreateLock.Unlock()
 
 	_, err := db.Exec(createMetaTableQuery)
+	dbQueries.Inc()
 	if err != nil {
-		log.Fatal(err)
+		queryErrors.Inc()
+		return errors.Wrap(err, "create meta table")
 	}
 
-	log.Printf("created table %s", metaTableName)
+	tablesCreated.Inc()
 	return nil
 }
 
@@ -118,28 +175,79 @@ func createMetricTable(db *sql.DB, name string, labels []string) error {
 	// create table
 	query := fmt.Sprintf(createTableQuery, name, fields.String())
 	_, err := db.Exec(query)
+	dbQueries.Inc()
 	if err != nil {
-		log.Fatal(err)
+		queryErrors.Inc()
+		return errors.Wrap(err, "create metric table")
 	}
+	tablesCreated.Inc()
 	log.Printf("created table %s", name)
 
 	// create meta table entry
 	query = fmt.Sprintf(insertMetaTableQuery, name, strings.Join(labels, ","))
-	log.Printf("insert meta table entry query: %s", query)
 	_, err = db.Exec(query)
+	dbQueries.Inc()
 	if err != nil {
-		log.Fatal(err)
+		queryErrors.Inc()
+		return errors.Wrap(err, "create meta table entry")
 	}
+	rowsInserted.Inc()
 	log.Printf("inserted metatable entry %s", name)
+
+	// new metric tabel means we need to refresh the labels cache
+	err = refreshLabelsMap(db)
+	if err != nil {
+		return errors.Wrap(err, "refresh labels map")
+	}
 
 	return nil
 }
 
-// TODO: make this in memory
-func getLabelsOrCreate(db *sql.DB, name string, metric model.Metric) []string {
-	var labels []string
-	if !tableExists(db, name) {
-		labels = make([]string, 0, len(metric)-1)
+// labelsMap functions
+
+func refreshLabelsMap(db *sql.DB) error {
+	labelsMapLock.Lock()
+	defer labelsMapLock.Unlock()
+
+	var (
+		metric string
+		labels string
+	)
+
+	newMap := map[string]string{}
+
+	rows, err := db.Query(selectAllMetaTableQuery)
+	dbQueries.Inc()
+	if err != nil {
+		queryErrors.Inc()
+		return errors.Wrap(err, "select all meta table query")
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		err = rows.Scan(&metric, &labels)
+		if err != nil {
+			rowScanErrors.Inc()
+			return errors.Wrap(err, "scan meta table rows")
+		}
+		newMap[metric] = labels
+		rowsRead.Inc()
+	}
+
+	err = rows.Err()
+	if err != nil {
+		rowErrors.Inc()
+		return errors.Wrap(err, "meta table row")
+	}
+
+	labelsMap = newMap
+	return nil
+}
+
+func getLabelsOrCreate(db *sql.DB, name string, metric model.Metric) ([]string, error) {
+	labelStr, exists := labelsMap[name]
+	if !exists {
+		labels := make([]string, 0, len(metric)-1)
 		for k := range metric {
 			if string(k) != model.MetricNameLabel {
 				labels = append(labels, string(k))
@@ -147,31 +255,18 @@ func getLabelsOrCreate(db *sql.DB, name string, metric model.Metric) []string {
 		}
 		err := createMetricTable(db, name, labels)
 		if err != nil {
-			log.Fatalf("createMetricTable: %s", err)
+			return nil, err
 		}
-	} else {
-		var tmpLabels string
-		err := db.QueryRow(fmt.Sprintf(selectMetaTableQuery, name)).Scan(&tmpLabels)
-		if err != nil {
-			log.Fatalf("selectMetaTableQuery: %s", err)
-		}
-		labels = strings.Split(tmpLabels, ",")
+		labelStr, _ = labelsMap[name]
 	}
-	return labels
+
+	return strings.Split(labelStr, ","), nil
 }
 
 func getLabels(db *sql.DB, name string) ([]string, error) {
-	var labels []string
-	if !tableExists(db, name) {
+	labelStr, exists := labelsMap[name]
+	if !exists {
 		return nil, fmt.Errorf("could not find table for metric %s", name)
 	}
-
-	var tmpLabels string
-	err := db.QueryRow(fmt.Sprintf(selectMetaTableQuery, name)).Scan(&tmpLabels)
-	if err != nil {
-		log.Fatalf("selectMetaTableQuery: %s", err)
-	}
-	labels = strings.Split(tmpLabels, ",")
-
-	return labels, nil
+	return strings.Split(labelStr, ","), nil
 }

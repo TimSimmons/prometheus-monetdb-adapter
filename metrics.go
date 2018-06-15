@@ -20,6 +20,42 @@ var rowsRead prometheus.Counter = prometheus.NewCounter(
 		Help: "Number of rows read from MonetDB.",
 	})
 
+var queryErrors prometheus.Counter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "monetdb_adapter_query_errors_total",
+		Help: "Number of errors encountered when processing queries from MonetDB.",
+	})
+
+var rowScanErrors prometheus.Counter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "monetdb_adapter_rowscan_errors_total",
+		Help: "Number of errors encountered when processing rows from MonetDB.",
+	})
+
+var rowErrors prometheus.Counter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "monetdb_adapter_row_errors_total",
+		Help: "Number of errors encountered when looping over rows from MonetDB.",
+	})
+
+var dbQueries prometheus.Counter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "monetdb_adapter_queries_total",
+		Help: "Number of times the adapter submits a query to MonetDB. Transactions count as one.",
+	})
+
+var openConns prometheus.Gauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "monetdb_adapter_open_connections_total",
+		Help: "Number of connections open to MonetDB.",
+	})
+
+var tablesCreated prometheus.Counter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "monetdb_adapter_tables_created_total",
+		Help: "Number of tables created by the adapter in MonetDB.",
+	})
+
 var readInFlight prometheus.Gauge = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "monetdb_adapter_reads_inflight",
 	Help: "Number of current HTTP read requests happening.",
@@ -66,7 +102,7 @@ var writeResponseSize *prometheus.HistogramVec = prometheus.NewHistogramVec(
 )
 
 func initMetrics(addr string) {
-	prometheus.MustRegister(rowsInserted, rowsRead, readInFlight, writeInFlight, requestsCounter, requestDuration, readResponseSize, writeResponseSize)
+	prometheus.MustRegister(rowsInserted, rowsRead, queryErrors, rowScanErrors, rowErrors, dbQueries, openConns, tablesCreated, readInFlight, writeInFlight, requestsCounter, requestDuration, readResponseSize, writeResponseSize)
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())

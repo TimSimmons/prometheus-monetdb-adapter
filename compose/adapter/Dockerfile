@@ -1,6 +1,6 @@
 FROM ubuntu:14.04
 
-ADD main /opt/
+ADD prometheus_monetdb_adapter /opt/
 ADD entrypoint.sh /opt/entrypoint.sh
 
 ENV PORT 1234

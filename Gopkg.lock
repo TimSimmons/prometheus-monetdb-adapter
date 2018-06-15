@@ -8,12 +8,6 @@
   revision = "3a771d992973f24aa725d07868b467d1ddfceafb"
 
 [[projects]]
-  branch = "master"
-  name = "github.com/fajran/go-monetdb"
-  packages = ["."]
-  revision = "8e87c8cb26fce863d74a97224f75767be30c2078"
-
-[[projects]]
   name = "github.com/gogo/protobuf"
   packages = ["gogoproto","proto","protoc-gen-gogo/descriptor","sortkeys","types"]
   revision = "1adfc126b41513cc696b209667c8656ea7aac67c"
@@ -38,10 +32,22 @@
   version = "v1.4.1"
 
 [[projects]]
+  branch = "master"
+  name = "github.com/mathume/monet"
+  packages = ["."]
+  revision = "b73e386f837a82957c7d5e9d65e4795eb9f8c6b8"
+
+[[projects]]
   name = "github.com/matttproud/golang_protobuf_extensions"
   packages = ["pbutil"]
   revision = "c12348ce28de40eed0136aa2b644d0ee0650e56c"
   version = "v1.0.1"
+
+[[projects]]
+  name = "github.com/pkg/errors"
+  packages = ["."]
+  revision = "645ef00459ed84a119197bfb8d8205042c6df63d"
+  version = "v0.8.0"
 
 [[projects]]
   branch = "master"
@@ -65,7 +71,7 @@
   branch = "master"
   name = "github.com/prometheus/procfs"
   packages = [".","internal/util","nfs","xfs"]
-  revision = "94663424ae5ae9856b40a9f170762b4197024661"
+  revision = "7d6f385de8bea29190f15ba9931442a0eaef9af7"
 
 [[projects]]
   name = "github.com/prometheus/prometheus"
@@ -77,7 +83,7 @@
   branch = "master"
   name = "golang.org/x/net"
   packages = ["context","http/httpguts","http2","http2/hpack","idna","internal/timeseries","trace"]
-  revision = "1e491301e022f8f977054da4c2d852decd59571f"
+  revision = "db08ff08e8622530d9ed3a0e8ac279f6d4c02196"
 
 [[projects]]
   name = "golang.org/x/text"
@@ -100,6 +106,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "10cca84165e25f5d0dadae2951def09eb117009923f4c354df6e43537738390a"
+  inputs-digest = "8809185c56f96e9b51d6af58c670459bbecd7bb48eead0773780679ac6323042"
   solver-name = "gps-cdcl"
   solver-version = 1

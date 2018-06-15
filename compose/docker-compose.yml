@@ -18,3 +18,11 @@ services:
     image: monetdb/monetdb-r-docker
     ports:
       - "50000:50000"
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring 
